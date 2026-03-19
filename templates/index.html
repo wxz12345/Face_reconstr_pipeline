@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Web Runner</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="header">
+        <h1>Web Runner</h1>
+        <p class="subtitle">Upload a video, then run the processing script.</p>
+      </header>
+
+      <section class="card">
+        <h2>1) Upload</h2>
+        <div class="row">
+          <input
+            id="fileInput"
+            type="file"
+            accept="video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,video/*"
+          />
+          <button id="uploadBtn" type="button">Upload</button>
+        </div>
+        <div class="hint">After upload, you’ll be able to start processing.</div>
+        <!-- <div id="uploadResult" class="kv"></div> -->
+      </section>
+
+      <section class="card">
+        <h2>2) Process</h2>
+        <div class="row">
+          <button id="startBtn" type="button" disabled>Start Processing</button>
+          <span id="taskIdLabel" class="mono" aria-live="polite"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Status</h2>
+        <div class="row row-tight">
+          <span id="statusBadge" class="badge badge-idle">idle</span>
+          <span id="statusText" class="statusText">Idle</span>
+          <button id="downloadBtn" type="button" hidden>Download Result</button>
+        </div>
+        <div id="metaArea" class="kv"></div>
+        <div id="errorArea" class="error" hidden></div>
+      </section>
+
+      <section class="card">
+        <h2>Output</h2>
+        <div class="split">
+          <div>
+            <div class="label">stdout</div>
+            <pre id="stdoutArea" class="log"></pre>
+          </div>
+          <div>
+            <div class="label">stderr</div>
+            <pre id="stderrArea" class="log"></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>
+
