@@ -8,6 +8,9 @@ SEQUENCE=${1}   # 序列名
 GPU_ID=${2}         # GPU 编号
 PORT=${3- "60000"}       # 训练可视化端口
 
+# SUFFIX='_test'
+SUFFIX=''
+
 # 锁定 GPU
 export CUDA_VISIBLE_DEVICES=$GPU_ID
 
@@ -26,9 +29,8 @@ export CUDA_VISIBLE_DEVICES=$GPU_ID
 # TRAIN_DATA_PATH="${EXPORT_OUTPUT_FOLDER}" 
 # TRAIN_OUTPUT_PATH="./output/${SEQUENCE}"
 
-
 # --- 基础定义 ---
-DATA_ROOT="upload"
+DATA_ROOT="uploads"
 # 所有的结果现在都以序列名作为主文件夹
 RESULTS_BASE="results/${SEQUENCE}"
 
@@ -46,13 +48,20 @@ TRAIN_OUTPUT_PATH="${RESULTS_BASE}/output"
 
 
 # --- web 路径定义 ---
-WEB_ROOT="../web_runner"
+WEB_ROOT=$(readlink -f "../web_runner")
 
 # 1. 自动定位并初始化 conda（这一步很重要）
+echo "[INFO] Initializing runtime environment"
+echo "[DEBUG] Initial cwd: $(pwd)"
+echo "[DEBUG] SEQUENCE=${SEQUENCE}, GPU_ID=${GPU_ID}, PORT=${PORT}, SUFFIX=${SUFFIX}"
+echo "[DEBUG] WEB_ROOT=${WEB_ROOT}"
+echo "[DEBUG] TRAIN_OUTPUT_PATH=${TRAIN_OUTPUT_PATH}"
 CONDA_PATH=$(conda info --base)
 source "$CONDA_PATH/etc/profile.d/conda.sh"
+echo "[DEBUG] CONDA_PATH=${CONDA_PATH}"
 
 conda activate pipe
+echo "[INFO] Conda environment activated: pipe"
 
 START_TIME=$(date +%s)
 echo "=========================================="
@@ -65,7 +74,9 @@ echo "=========================================="
 # 2. 项目1: 预处理与追踪 (VHAP)
 # ==========================================
 # 进入VHAP目录并执行预处理
+echo "[INFO] Entering VHAP stage"
 cd ../VHAP || { echo "无法进入VHAP目录"; exit 1; }
+echo "[DEBUG] VHAP cwd: $(pwd)"
 
 # Step 1: 视频 -> 图片
 
@@ -81,12 +92,15 @@ cd ../VHAP || { echo "无法进入VHAP目录"; exit 1; }
 # 隐式输出： 通常还会生成对应的掩码文件夹 masks/。
 
 if [ ! -d "${WEB_ROOT}/${DATA_ROOT}/${SEQUENCE}/images" ]; then
-    echo ">>> [Step 1/5] 正在进行视频预处理..."
-    python vhap/preprocess_video.py \
+    echo "[INFO] [Step 1/5] Starting preprocess"
+    echo "[DEBUG] Step 1 input: ${WEB_ROOT}/${DATA_ROOT}/${SEQUENCE}.mp4"
+    echo "[DEBUG] Step 1 output dir: ${WEB_ROOT}/${DATA_ROOT}/${SEQUENCE}/images"
+    python vhap/preprocess_video${SUFFIX}.py \
         --input "${WEB_ROOT}/${DATA_ROOT}/${SEQUENCE}.mp4" \
-        --matting_method robust_video_matting || { echo "Step 1 失败"; exit 1; }
+        --matting_method robust_video_matting || { echo "[ERROR] Step 1 failed"; exit 1; }
+    echo "[INFO] [Step 1/5] Preprocess finished"
 else
-    echo ">>> [Step 1/5] 跳过预处理（目录已存在）。"
+    echo "[INFO] [Step 1/5] Skip preprocess (output already exists)"
 fi
 
 # Step 2: 追踪
@@ -103,13 +117,16 @@ fi
 # 注意： 这里的输出还不能直接给训练程序用，因为它是项目特有的中间格式。
 
 if [ ! -d "./${WEB_ROOT}/${TRACK_OUTPUT_FOLDER}" ]; then
-    echo ">>> [Step 2/5] 正在运行追踪程序..."
-    python vhap/track.py \
+    echo "[INFO] [Step 2/5] Starting tracking"
+    echo "[DEBUG] Step 2 root folder: ${WEB_ROOT}/${DATA_ROOT}"
+    echo "[DEBUG] Step 2 output folder: ${WEB_ROOT}/${TRACK_OUTPUT_FOLDER}"
+    python vhap/track${SUFFIX}.py \
         --data.root_folder "${WEB_ROOT}/${DATA_ROOT}" \
         --exp.output_folder "${WEB_ROOT}/${TRACK_OUTPUT_FOLDER}" \
-        --data.sequence "$SEQUENCE" || { echo "Step 2 失败"; exit 1; }
+        --data.sequence "$SEQUENCE" || { echo "[ERROR] Step 2 failed"; exit 1; }
+    echo "[INFO] [Step 2/5] Tracking finished"
 else
-    echo ">>> [Step 2/5] 跳过追踪（目录已存在）。"
+    echo "[INFO] [Step 2/5] Skip tracking (output already exists)"
 fi
 
 # Step 3: 导出 NeRF 格式
@@ -131,30 +148,38 @@ fi
 # cd ../end2end_rec || { echo "无法进入end2end_rec目录"; exit 1; }
 
 if [ ! -d "${WEB_ROOT}/${EXPORT_OUTPUT_FOLDER}" ]; then
-    echo ">>> [Step 3/5] 正在导出为 NeRF 数据集格式..."
-    python vhap/export_as_nerf_dataset.py \
+    echo "[INFO] [Step 3/5] Starting NeRF export"
+    echo "[DEBUG] Step 3 source: ${WEB_ROOT}/${TRACK_OUTPUT_FOLDER}"
+    echo "[DEBUG] Step 3 target: ${WEB_ROOT}/${EXPORT_OUTPUT_FOLDER}"
+    python vhap/export_as_nerf_dataset${SUFFIX}.py \
         --src_folder "${WEB_ROOT}/${TRACK_OUTPUT_FOLDER}" \
         --tgt_folder "${WEB_ROOT}/${EXPORT_OUTPUT_FOLDER}" \
-        --background-color white || { echo "Step 3 失败"; exit 1; }
+        --background-color white || { echo "[ERROR] Step 3 failed"; exit 1; }
+    echo "[INFO] [Step 3/5] NeRF export finished"
 else
-    echo ">>> [Step 3/5] 跳过导出（目录已存在）。"
+    echo "[INFO] [Step 3/5] Skip NeRF export (output already exists)"
 fi
 
 # ==========================================
 # 3. 项目2: 训练 (GSA)
 # ==========================================
 # 进入GaussianAvatars目录并执行训练
+echo "[INFO] Entering GaussianAvatars stage"
 cd ../GaussianAvatars || { echo "无法进入GaussianAvatars目录"; exit 1; }
+echo "[DEBUG] GaussianAvatars cwd: $(pwd)"
 
-echo ">>> [Step 4/5] 开始训练..."
+echo "[INFO] [Step 4/5] Starting training"
+echo "[DEBUG] Step 4 data path: ${WEB_ROOT}/${TRAIN_DATA_PATH}"
+echo "[DEBUG] Step 4 model path: ${WEB_ROOT}/${TRAIN_OUTPUT_PATH}"
 # 注意：这里直接使用了项目1产生的 EXPORT_OUTPUT_FOLDER
-python ./train.py \
+python ./train${SUFFIX}.py \
     -s "${WEB_ROOT}/${TRAIN_DATA_PATH}" \
     -m "${WEB_ROOT}/${TRAIN_OUTPUT_PATH}" \
     --eval \
     --bind_to_mesh \
     --white_background \
-    --port "$PORT" || { echo "训练失败"; exit 1; }
+    --port "$PORT" || { echo "[ERROR] Training failed"; exit 1; }
+echo "[INFO] [Step 4/5] Training finished"
 
 # ==========================================
 # 4. 结束总结
@@ -169,36 +194,35 @@ echo "模型目录: ${TRAIN_OUTPUT_PATH}"
 echo "总耗时: $(($ELAPSED_TIME / 3600))小时$((($ELAPSED_TIME % 3600) / 60))分钟$(($ELAPSED_TIME % 60))秒"
 echo "=========================================="
 
+echo "[INFO] Entering packaging stage"
 cd ../web_runner || { echo "无法进入web_runner目录"; exit 1; }
+echo "[DEBUG] Packaging cwd: $(pwd)"
 
-echo ">>> [Step 5/5] 开始打包..."
+echo "[INFO] [Step 5/5] Starting zip packaging"
 
-python 
+command -v zip >/dev/null 2>&1 || { echo "[ERROR] zip command not found"; exit 1; }
 
+WEB_ROOT_DIR="$(pwd)"
+ZIP_DIR="${WEB_ROOT_DIR}/results/zip_res"
+SRC_DIR="${WEB_ROOT_DIR}/${TRAIN_OUTPUT_PATH}"
+FINAL_ZIP_PATH="${ZIP_DIR}/${SEQUENCE}.zip"
 
-# # 定义最终 Zip 存放在哪里（比如放在 results/video_01 目录下）
-# FINAL_ZIP_PATH="${RESULTS_BASE}/zip_res/${SEQUENCE}.zip"
+mkdir -p "${ZIP_DIR}"
+if [ ! -d "${SRC_DIR}" ]; then
+    echo "[ERROR] Output directory not found: ${SRC_DIR}"
+    exit 1
+fi
 
-# # --- 2. 在 output 文件夹内生成 summary.txt ---
-# # 既然不打算删 tmp，直接写在 output 里也是一样的
-# SUMMARY_PATH="${TRAIN_OUTPUT_PATH}/summary.txt"
-# TS=$(date "+%Y-%m-%d %H:%M:%S")
+rm -f "${FINAL_ZIP_PATH}"
 
-# cat <<EOF > "$SUMMARY_PATH"
-# Input video: ./upload/${SEQUENCE}
-# Processed at: $TS
-# Status: success
-# Sequence ID: $SEQUENCE
-# EOF
+echo "[DEBUG] ZIP_DIR=${ZIP_DIR}"
+echo "[DEBUG] SRC_DIR=${SRC_DIR}"
+echo "[DEBUG] FINAL_ZIP_PATH=${FINAL_ZIP_PATH}"
+echo "[INFO] Zipping ${SRC_DIR} -> ${FINAL_ZIP_PATH}"
+(
+    cd "${SRC_DIR}" || exit 1
+    zip -r -9 "${FINAL_ZIP_PATH}" . || exit 1
+) || { echo "[ERROR] Zip creation failed"; exit 1; }
 
-# # --- 3. 执行打包 ---
-# # 我们使用 ( ) 开启子 Shell，这样 cd 命令不会改变你当前主脚本的工作目录
-# echo "Zipping output folder to $FINAL_ZIP_PATH..."
-# (
-#     cd "$TRAIN_OUTPUT_PATH" || exit
-#     # 将当前目录 (.) 下的所有内容压缩到目标路径
-#     # -r 表示递归压缩子目录
-#     zip -r "../../$(basename "$FINAL_ZIP_PATH")" ./*
-# )
-
-# echo "Done! Zip created at: $FINAL_ZIP_PATH"
+echo "[INFO] [Step 5/5] Zip packaging finished"
+echo "[INFO] Zip created at: ${FINAL_ZIP_PATH}"
