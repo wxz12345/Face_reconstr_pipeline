@@ -18,5 +18,5 @@ MAX_LOG_LENGTH = 200_000
 
 # Keep only the latest N log lines for task stdout/stderr.
 # This is enforced as a rolling window during streaming, so polling stays readable.
-MAX_TASK_LOG_LINES = 10
+MAX_TASK_LOG_LINES = 100
 
