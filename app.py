@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import threading
 import uuid
@@ -159,20 +160,72 @@ def create_app() -> Flask:
                 # 子进程运行脚本
                 # 调用脚本的地方
                 # bash 脚本路径 输入文件路径 输出文件路径
+                out_lines: list[str] = []
+                err_lines: list[str] = []
+                out_lock = threading.Lock()
+                err_lock = threading.Lock()
+
+                child_env = os.environ.copy()
+                # Make python scripts invoked by whole.sh flush output promptly.
+                child_env["PYTHONUNBUFFERED"] = "1"
+
                 proc = subprocess.Popen(
                     ["bash", str(config.SCRIPT_PATH), fpath, str(gpu)],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    bufsize=1,
+                    env=child_env,
                 )
-                # 使用subprocess.PIPE将标准输出和标准错误重定向到管道
-                # 使用proc.communicate()等待子进程完成
-                out, err = proc.communicate()
+
+                def _stream_output(
+                    stream, lines: list[str], lock: threading.Lock, field: str
+                ) -> None:
+                    if stream is None:
+                        return
+                    for line in iter(stream.readline, ""):
+                        with lock:
+                            lines.append(line)
+                            # Enforce a rolling line limit so the frontend stays readable.
+                            if len(lines) > config.MAX_TASK_LOG_LINES:
+                                del lines[: len(lines) - config.MAX_TASK_LOG_LINES]
+                            joined = "".join(lines)
+                        task_manager.update_task(
+                            tid,
+                            **{
+                                field: task_manager.truncate_text(
+                                    joined, config.MAX_LOG_LENGTH
+                                )
+                            },
+                        )
+                    stream.close()
+
+                stdout_thread = threading.Thread(
+                    target=_stream_output,
+                    args=(proc.stdout, out_lines, out_lock, "stdout"),
+                    daemon=True,
+                )
+                stderr_thread = threading.Thread(
+                    target=_stream_output,
+                    args=(proc.stderr, err_lines, err_lock, "stderr"),
+                    daemon=True,
+                )
+                stdout_thread.start()
+                stderr_thread.start()
+                proc.wait()
+                stdout_thread.join()
+                stderr_thread.join()
                 # 获取子进程的返回码
                 rc = proc.returncode
                 # 截断标准输出和标准错误，避免过长
-                out_t = task_manager.truncate_text(out, config.MAX_LOG_LENGTH)
-                err_t = task_manager.truncate_text(err, config.MAX_LOG_LENGTH)
+                with out_lock:
+                    out_t = task_manager.truncate_text(
+                        "".join(out_lines), config.MAX_LOG_LENGTH
+                    )
+                with err_lock:
+                    err_t = task_manager.truncate_text(
+                        "".join(err_lines), config.MAX_LOG_LENGTH
+                    )
                 # 检测结果文件是否存在
                 result_file_exists = Path(rpath).is_file()
                 # 如果返回码为0且结果文件存在，则任务成功
