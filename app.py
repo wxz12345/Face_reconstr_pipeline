@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 import threading
 import uuid
@@ -124,7 +125,7 @@ def create_app() -> Flask:
         if not file_path:
             return jsonify({"success": False, "error": "task missing file_path"}), 500
 
-        seq_name = file_path.stem
+        seq_name = Path(file_path).stem
         # 生成结果文件名和路径
         result_filename = f"{seq_name}.zip"
         result_path = config.RESULTS_FOLDER / result_filename
@@ -159,7 +160,7 @@ def create_app() -> Flask:
                 # 调用脚本的地方
                 # bash 脚本路径 输入文件路径 输出文件路径
                 proc = subprocess.Popen(
-                    ["bash", str(config.SCRIPT_PATH), fpath, gpu],
+                    ["bash", str(config.SCRIPT_PATH), fpath, str(gpu)],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -206,6 +207,12 @@ def create_app() -> Flask:
                     result_message=result_message,
                 )
             except Exception as e:
+                logging.exception(
+                    "run_task _runner failed task_id=%s path=%s gpu=%s",
+                    tid,
+                    fpath,
+                    gpu,
+                )
                 task_manager.update_task(
                     tid,
                     status="failed",

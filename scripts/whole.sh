@@ -28,9 +28,9 @@ export CUDA_VISIBLE_DEVICES=$GPU_ID
 
 
 # --- 基础定义 ---
-DATA_ROOT="./upload"
+DATA_ROOT="upload"
 # 所有的结果现在都以序列名作为主文件夹
-RESULTS_BASE="./results/${SEQUENCE}"
+RESULTS_BASE="results/${SEQUENCE}"
 
 # --- 项目1 路径定义 ---
 SEQ_DATA_DIR="${DATA_ROOT}/${SEQUENCE}"
@@ -47,6 +47,12 @@ TRAIN_OUTPUT_PATH="${RESULTS_BASE}/output"
 
 # --- web 路径定义 ---
 WEB_ROOT="../web_runner"
+
+# 1. 自动定位并初始化 conda（这一步很重要）
+CONDA_PATH=$(conda info --base)
+source "$CONDA_PATH/etc/profile.d/conda.sh"
+
+conda activate pipe
 
 START_TIME=$(date +%s)
 echo "=========================================="
@@ -75,12 +81,12 @@ cd ../VHAP || { echo "无法进入VHAP目录"; exit 1; }
 # 隐式输出： 通常还会生成对应的掩码文件夹 masks/。
 
 if [ ! -d "${WEB_ROOT}/${DATA_ROOT}/${SEQUENCE}/images" ]; then
-    echo ">>> [Step 1/4] 正在进行视频预处理..."
-    python ./vhap/preprocess_video copy.py \
+    echo ">>> [Step 1/5] 正在进行视频预处理..."
+    python vhap/preprocess_video.py \
         --input "${WEB_ROOT}/${DATA_ROOT}/${SEQUENCE}.mp4" \
         --matting_method robust_video_matting || { echo "Step 1 失败"; exit 1; }
 else
-    echo ">>> [Step 1/4] 跳过预处理（目录已存在）。"
+    echo ">>> [Step 1/5] 跳过预处理（目录已存在）。"
 fi
 
 # Step 2: 追踪
@@ -97,13 +103,13 @@ fi
 # 注意： 这里的输出还不能直接给训练程序用，因为它是项目特有的中间格式。
 
 if [ ! -d "./${WEB_ROOT}/${TRACK_OUTPUT_FOLDER}" ]; then
-    echo ">>> [Step 2/4] 正在运行追踪程序..."
-    python vhap/track copy.py \
+    echo ">>> [Step 2/5] 正在运行追踪程序..."
+    python vhap/track.py \
         --data.root_folder "${WEB_ROOT}/${DATA_ROOT}" \
         --exp.output_folder "${WEB_ROOT}/${TRACK_OUTPUT_FOLDER}" \
         --data.sequence "$SEQUENCE" || { echo "Step 2 失败"; exit 1; }
 else
-    echo ">>> [Step 2/4] 跳过追踪（目录已存在）。"
+    echo ">>> [Step 2/5] 跳过追踪（目录已存在）。"
 fi
 
 # Step 3: 导出 NeRF 格式
@@ -125,13 +131,13 @@ fi
 # cd ../end2end_rec || { echo "无法进入end2end_rec目录"; exit 1; }
 
 if [ ! -d "${WEB_ROOT}/${EXPORT_OUTPUT_FOLDER}" ]; then
-    echo ">>> [Step 3/4] 正在导出为 NeRF 数据集格式..."
-    python vhap/export_as_nerf_dataset copy.py \
+    echo ">>> [Step 3/5] 正在导出为 NeRF 数据集格式..."
+    python vhap/export_as_nerf_dataset.py \
         --src_folder "${WEB_ROOT}/${TRACK_OUTPUT_FOLDER}" \
         --tgt_folder "${WEB_ROOT}/${EXPORT_OUTPUT_FOLDER}" \
         --background-color white || { echo "Step 3 失败"; exit 1; }
 else
-    echo ">>> [Step 3/4] 跳过导出（目录已存在）。"
+    echo ">>> [Step 3/5] 跳过导出（目录已存在）。"
 fi
 
 # ==========================================
@@ -140,9 +146,9 @@ fi
 # 进入GaussianAvatars目录并执行训练
 cd ../GaussianAvatars || { echo "无法进入GaussianAvatars目录"; exit 1; }
 
-echo ">>> [Step 4/4] 开始训练..."
+echo ">>> [Step 4/5] 开始训练..."
 # 注意：这里直接使用了项目1产生的 EXPORT_OUTPUT_FOLDER
-python ./train copy.py \
+python ./train.py \
     -s "${WEB_ROOT}/${TRAIN_DATA_PATH}" \
     -m "${WEB_ROOT}/${TRAIN_OUTPUT_PATH}" \
     --eval \
@@ -157,40 +163,42 @@ END_TIME=$(date +%s)
 ELAPSED_TIME=$((END_TIME - START_TIME))
 
 echo "=========================================="
-echo "所有流程执行完毕！"
+echo "主要流程执行完毕！"
 echo "数据目录: ${TRAIN_DATA_PATH}"
 echo "模型目录: ${TRAIN_OUTPUT_PATH}"
 echo "总耗时: $(($ELAPSED_TIME / 3600))小时$((($ELAPSED_TIME % 3600) / 60))分钟$(($ELAPSED_TIME % 60))秒"
 echo "=========================================="
 
+cd ../web_runner || { echo "无法进入web_runner目录"; exit 1; }
+
+echo ">>> [Step 5/5] 开始打包..."
+
+python 
 
 
+# # 定义最终 Zip 存放在哪里（比如放在 results/video_01 目录下）
+# FINAL_ZIP_PATH="${RESULTS_BASE}/zip_res/${SEQUENCE}.zip"
 
+# # --- 2. 在 output 文件夹内生成 summary.txt ---
+# # 既然不打算删 tmp，直接写在 output 里也是一样的
+# SUMMARY_PATH="${TRAIN_OUTPUT_PATH}/summary.txt"
+# TS=$(date "+%Y-%m-%d %H:%M:%S")
 
+# cat <<EOF > "$SUMMARY_PATH"
+# Input video: ./upload/${SEQUENCE}
+# Processed at: $TS
+# Status: success
+# Sequence ID: $SEQUENCE
+# EOF
 
-# 定义最终 Zip 存放在哪里（比如放在 results/video_01 目录下）
-FINAL_ZIP_PATH="${RESULTS_BASE}/zip_res/${SEQUENCE}.zip"
+# # --- 3. 执行打包 ---
+# # 我们使用 ( ) 开启子 Shell，这样 cd 命令不会改变你当前主脚本的工作目录
+# echo "Zipping output folder to $FINAL_ZIP_PATH..."
+# (
+#     cd "$TRAIN_OUTPUT_PATH" || exit
+#     # 将当前目录 (.) 下的所有内容压缩到目标路径
+#     # -r 表示递归压缩子目录
+#     zip -r "../../$(basename "$FINAL_ZIP_PATH")" ./*
+# )
 
-# --- 2. 在 output 文件夹内生成 summary.txt ---
-# 既然不打算删 tmp，直接写在 output 里也是一样的
-SUMMARY_PATH="${TRAIN_OUTPUT_PATH}/summary.txt"
-TS=$(date "+%Y-%m-%d %H:%M:%S")
-
-cat <<EOF > "$SUMMARY_PATH"
-Input video: ./upload/${SEQUENCE}
-Processed at: $TS
-Status: success
-Sequence ID: $SEQUENCE
-EOF
-
-# --- 3. 执行打包 ---
-# 我们使用 ( ) 开启子 Shell，这样 cd 命令不会改变你当前主脚本的工作目录
-echo "Zipping output folder to $FINAL_ZIP_PATH..."
-(
-    cd "$TRAIN_OUTPUT_PATH" || exit
-    # 将当前目录 (.) 下的所有内容压缩到目标路径
-    # -r 表示递归压缩子目录
-    zip -r "../../$(basename "$FINAL_ZIP_PATH")" ./*
-)
-
-echo "Done! Zip created at: $FINAL_ZIP_PATH"
+# echo "Done! Zip created at: $FINAL_ZIP_PATH"
