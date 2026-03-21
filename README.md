@@ -1,170 +1,120 @@
 # Web Runner (Flask MVP)
 
-A minimal Flask web app to:
+A **minimal, stable MVP**: a Flask web app on Linux for **long-running video processing**. You upload a video in the browser; the server runs a **bash pipeline** (`whole.sh`) in a **background thread**, streams **stdout/stderr** to the UI via polling, and serves a **ZIP** when the job succeeds.
 
-- Upload a video from your browser (saved into `uploads/`)
-- Click “Start Processing” to run `scripts/run_pipeline.sh` **asynchronously**
-- Poll task status from the browser until the job is done (`uploaded → queued → running → success|failed`)
-- View `stdout`/`stderr` captured from the script
+Intended for a **school/lab server**: bind address defaults to **`127.0.0.1`** — use **SSH port forwarding** to reach it from your laptop. Do not expose it to the public internet without hardening.
 
-This is an MVP intended for a **Linux school server**. It is meant to be accessed via **SSH port forwarding** and **not exposed to the public internet**. The server binds to `127.0.0.1` only.
+## Current features
+
+- **Web UI** — single page: upload, optional username, GPU status/selector, task history, status + live logs, ZIP download when ready.
+- **Upload** — `POST /upload` saves the file under `uploads/` (UUID-prefixed name), creates a task (`uploaded`).
+- **Async run** — `POST /run/<task_id>` queues work and starts `bash scripts/whole.sh <sequence_stem> <gpu_id>` in a **non-blocking** thread (same process).
+- **Pipeline entry** — `scripts/whole.sh` is the main entry; it runs your real steps (VHAP preprocessing/track/export, GaussianAvatars `train.py`, etc.) and, on success, **builds a ZIP** of the training output into `results/zip_res/<sequence>.zip`.
+- **Live logs** — stdout/stderr from the shell and child Python processes are captured incrementally; the UI polls **`GET /status/<task_id>`** about every 2s. Logs are capped for UI size (`MAX_TASK_LOG_LINES`, `MAX_LOG_LENGTH` in `config.py`).
+- **ZIP download** — when the script exits successfully and the expected ZIP exists, the task is **`success`** with **`download_ready`**. **`GET /download/<task_id>`** sends the file; the UI shows a download control.
+- **Disk persistence** — task metadata in `data/tasks.json`; full combined log stream in `data/logs/<task_id>.log`. On server **restart**, tasks that were **`running`** become **`interrupted`**.
+- **Task list** — `GET /tasks?username=<name>` (UI uses a username field; default bucket is `default`).
+- **GPU (optional)** — `GET /gpu/status` uses **`nvidia-smi`** when available. Upload/run accept **`gpu`** query params; the UI can pick a GPU before upload/start.
 
 ## Requirements
 
-- **Python 3.9+**
-- A shell environment that can run `bash`
+- **Python 3.10+** (code uses modern typing; adjust if needed)
+- **Linux** with **`bash`**
+- Whatever **`whole.sh`** needs (conda env, sibling repos such as VHAP / GaussianAvatars, CUDA, etc. — see `scripts/whole.sh`)
+- **`zip`** on the server for the packaging step inside `whole.sh`
+- **`nvidia-smi`** only if you want the GPU status panel to show real data (otherwise the UI falls back safely)
 
-## Project structure
+## Project structure (important paths)
 
 ```
 web_runner/
-  app.py                  # Flask app + API endpoints
-  config.py               # Paths and limits (upload folder, script path, 2GB limit)
-  task_manager.py         # In-memory task store + helpers
-  requirements.txt        # Python dependencies (minimal)
-  uploads/                # Uploaded videos saved here
-  scripts/run_pipeline.sh # The script that processes one uploaded file
-  templates/index.html    # Single-page UI (no frameworks)
-  static/app.js           # Calls /upload, /run, polls /status
-  static/style.css        # Simple card UI + status badges
+  app.py                 # Flask app, routes, subprocess + log streaming, persistence
+  config.py              # Paths, upload limit, log caps, data/ paths, default GPU
+  task_manager.py        # In-memory task dict + helpers (loaded from disk at startup)
+  requirements.txt
+  data/
+    tasks.json           # Persisted task metadata (created at runtime)
+    logs/<task_id>.log   # Full persisted log lines (created when a run starts)
+  uploads/               # Uploaded videos
+  results/zip_res/       # ZIP artifacts produced by the pipeline (expected by the app)
+  scripts/whole.sh       # Main pipeline entry (called by the backend)
+  templates/index.html   # UI
+  static/app.js          # Upload, run, poll, history, GPU controls
+  static/style.css
 ```
 
-## Setup (on the school server)
-
-From the repo/workspace root:
+## Setup
 
 ```bash
 cd web_runner
-```
-
-Create and activate a virtual environment:
-
-```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
 pip install -r requirements.txt
 ```
 
-Ensure required paths exist:
+Ensure directories exist (the app creates most of them on startup; you still need a working `whole.sh` and pipeline layout):
 
 ```bash
-mkdir -p uploads
-ls -la scripts/run_pipeline.sh
+mkdir -p uploads results/zip_res
+# whole.sh must be runnable (often: chmod +x scripts/whole.sh)
 ```
 
-Make the script executable:
-
-```bash
-chmod +x scripts/run_pipeline.sh
-```
-
-## Run (server-side)
-
-Start Flask:
+## Run locally / on the server
 
 ```bash
 python app.py
 ```
 
-By default it listens on **`127.0.0.1:5000`** (server-local only).
+Default: **`http://127.0.0.1:5000`**. Change `HOST` / `PORT` in `config.py` if needed.
 
-### Quick server-local test
-
-On the server:
+### Access from your laptop (SSH forwarding)
 
 ```bash
-curl http://127.0.0.1:5000
+ssh -L 5000:localhost:5000 user@your-server
 ```
 
-You should get HTML back (HTTP 200).
+Then open **`http://localhost:5000`** in your browser.
 
-## Access from your personal computer (IMPORTANT)
+## Main request flow
 
-Because the server binds to `127.0.0.1`, you must use SSH port forwarding.
+1. **Browser** loads the page (`GET /`).
+2. **Optional:** UI loads GPU info (`GET /gpu/status`) and task list (`GET /tasks?username=...`).
+3. **Upload** — `POST /upload?username=...&gpu=...` (form field **`video`**). File saved under `uploads/`; response includes **`task_id`**, status **`uploaded`**.
+4. **Start** — `POST /run/<task_id>?gpu=...`. Task moves to **`queued`** then **`running`**; `whole.sh` runs in a daemon thread.
+5. **Poll** — `GET /status/<task_id>` returns JSON including **`task.stdout`**, **`task.stderr`**, **`status`**, **`error_message`**, **`download_ready`**, etc. The UI stops polling when the task is **`success`** or **`failed`**. A task may show **`interrupted`** if the server was restarted while it was **`running`**.
+6. **Download** — when **`success`** and **`download_ready`**, open **`GET /download/<task_id>`** (or use the UI button).
 
-From your personal computer:
+### API summary (implemented)
 
-```bash
-ssh -L 5000:localhost:5000 xwangke@eez214.ece.ust.hk
-```
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/` | HTML UI |
+| GET | `/gpu/status` | JSON GPU snapshot (`nvidia-smi` or safe fallback) |
+| POST | `/upload` | Multipart `video`; query `username`, optional `gpu` |
+| POST | `/run/<task_id>` | Start async job; query `gpu` (defaults if omitted) |
+| GET | `/status/<task_id>` | Task + tail of logs from disk |
+| GET | `/tasks?username=` | List tasks for that username |
+| GET | `/download/<task_id>` | ZIP file when task completed successfully |
 
-Then open this on your personal computer:
+## Notes on `whole.sh`
 
-- `http://localhost:5000`
-
-Keep the SSH session open while you use the web page.
-
-## Usage flow
-
-1. Open `http://localhost:5000` (through SSH port forwarding).
-2. Select a video file (`.mp4`, `.mov`, `.avi`, `.mkv`).
-3. Click **Upload**.
-   - The backend saves the file into `uploads/` with a UUID prefix.
-   - You’ll see `task_id`, `filename`, `file_path`, and status `uploaded`.
-4. Click **Start Processing**.
-   - The backend runs `bash scripts/run_pipeline.sh <file_path>` in a background thread.
-   - The UI polls `/status/<task_id>` every 2 seconds.
-5. Watch status and logs.
-   - Polling stops automatically when status becomes `success` or `failed`.
+- The backend does **not** embed pipeline logic in Python — it invokes **`scripts/whole.sh`** with the **sequence name** (stem of the stored upload filename) and **GPU index** as **argv** (`$1`, `$2`).
+- **`CUDA_VISIBLE_DEVICES`** and training paths are handled inside `whole.sh` and the Python scripts it calls.
+- The **ZIP** path the app expects is **`results/zip_res/<sequence_stem>.zip`** under `web_runner` (aligned with `config.RESULTS_FOLDER`).
 
 ## Troubleshooting
 
-- **Port already in use (5000)**:
-  - Error looks like “Address already in use” / “Port 5000 is in use”.
-  - Fix: stop the process using port 5000 or change `PORT` in `config.py`.
+- **Script not found** — `config.SCRIPT_PATH` must point to `scripts/whole.sh`.
+- **Run fails / non-zero exit** — Check live **`stderr`** in the UI and `error_message` on the task; run `whole.sh` manually with the same arguments to debug.
+- **Success but no download** — ZIP missing at `results/zip_res/<stem>.zip` or pipeline exited non-zero.
+- **Port in use** — Change `PORT` in `config.py` or free port 5000.
+- **Large uploads** — `MAX_CONTENT_LENGTH` is 2GB in `config.py`.
+- **Logs look short** — By design: rolling line cap + character truncation in `config.py`.
+- **Restart during a run** — That task is marked **`interrupted`** in `data/tasks.json`; re-upload for a fresh run if needed.
 
-- **Forgot SSH port forwarding**:
-  - Symptom: browser can’t connect to `http://localhost:5000` on your personal computer.
-  - Fix: run `ssh -L 5000:localhost:5000 xwangke@your_school_server` and keep it open.
+## Summary of README changes (this edit)
 
-- **Script not found**:
-  - Symptom: `/run/<task_id>` returns `{"success":false,"error":"script not found"}`.
-  - Fix: confirm `scripts/run_pipeline.sh` exists at that exact path.
-
-- **Script not executable**:
-  - Symptom: run fails; `stderr` may mention “Permission denied”.
-  - Fix: `chmod +x scripts/run_pipeline.sh`.
-
-- **Uploads directory permission denied**:
-  - Symptom: upload fails with a server error, or file can’t be saved.
-  - Fix: ensure `uploads/` exists and is writable by your user (`mkdir -p uploads`, check permissions).
-
-- **File too large**:
-  - Symptom: upload fails (often with HTTP 413) for very large files.
-  - Cause: `MAX_CONTENT_LENGTH` in `config.py` (currently 2GB).
-  - Fix: upload a smaller file or raise the limit (server memory/storage permitting).
-
-- **task_id not found**:
-  - Symptom: `/status/<task_id>` or `/run/<task_id>` returns 404 with `task not found`.
-  - Cause: tasks are stored **in memory**; restarting `python app.py` clears all tasks.
-  - Fix: re-upload and use the new `task_id`.
-
-- **Duplicate run attempt**:
-  - Symptom: `/run/<task_id>` returns 409 like “task already running/queued” or “task already finished”.
-  - MVP behavior: a task can be run only once.
-  - Fix: upload again to create a new task.
-
-- **Upload succeeds but run fails**:
-  - Check `stderr` and `error_message` in the status panel.
-  - Common causes: missing dependencies inside `run_pipeline.sh`, wrong file path, script errors.
-  - Tip: run the script manually on the server to debug:
-    - `bash scripts/run_pipeline.sh /absolute/path/to/uploaded_file`
-
-- **stdout/stderr truncated (by design)**:
-  - The backend truncates captured logs to `MAX_LOG_LENGTH` (see `config.py`) to keep responses small.
-
-## Future extensions (if you need more than an MVP)
-
-- Persist tasks in a **database** (so restarts don’t lose task state)
-- Use a real **task queue** (Celery/RQ/Sidekiq-like) instead of threads
-- Production deployment with **Gunicorn + Nginx** (and proper systemd service)
-- Add **authentication** (at minimum, password protection) before any broader access
-- **Auto-trigger processing** immediately after upload
-- Allow **output file download** from the UI
-- Integrate a real **video pipeline** (ffmpeg/transcoding, ML inference, etc.)
-
+- Replaced outdated **`run_pipeline.sh`** references with **`scripts/whole.sh`** and the real async + ZIP flow.
+- Documented **live log streaming**, **ZIP under `results/zip_res`**, **`GET /download`**, and **disk persistence** (`data/tasks.json`, `data/logs/`, interrupted-on-restart).
+- Listed **implemented** endpoints including **`/gpu/status`**, **`/tasks`**, and **`gpu` / `username` query params**.
+- Trimmed speculative “future” items; kept practical structure, run instructions, and troubleshooting aligned with the current code.
