@@ -11,6 +11,11 @@
   const stderrArea = document.getElementById("stderrArea");
   const taskIdLabel = document.getElementById("taskIdLabel");
   const downloadBtn = document.getElementById("downloadBtn");
+  const usernameInput = document.getElementById("usernameInput");
+  const taskHistorySelect = document.getElementById("taskHistorySelect");
+
+  const LS_USERNAME_KEY = "webRunnerUsername";
+  const LS_LAST_TASK_KEY = "webRunnerLastSelectedTaskId";
 
   let currentTaskId = null;
   let pollTimer = null;
@@ -133,7 +138,7 @@
       const data = await fetchJson(`/status/${encodeURIComponent(taskId)}`, { method: "GET" });
       if (!data || data.success !== true) {
         setError(data?.error || "Unknown error");
-        return;
+        return null;
       }
       const task = data.task;
       setError(null);
@@ -153,8 +158,99 @@
         isRunning = false;
         setButtons();
       }
+      return st;
     } catch (e) {
       setError(`Status poll failed: ${e.message || String(e)}`);
+      return null;
+    }
+  }
+
+  function renderTaskHistory(tasks) {
+    if (!taskHistorySelect) return;
+    taskHistorySelect.innerHTML = "";
+    if (!tasks || tasks.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "No tasks";
+      taskHistorySelect.appendChild(opt);
+      return;
+    }
+    for (const t of tasks) {
+      const opt = document.createElement("option");
+      opt.value = t.task_id;
+      const filename = t.filename || t.task_id;
+      const status = t.status || "unknown";
+      opt.textContent = `${filename} [${status}]`;
+      taskHistorySelect.appendChild(opt);
+    }
+  }
+
+  async function loadTasksForUsername(username) {
+    const uname = (username || "").trim() || "default";
+    usernameInput && (usernameInput.value = uname);
+
+    const data = await fetchJson(`/tasks?username=${encodeURIComponent(uname)}`, { method: "GET" });
+    if (!data || data.success !== true) {
+      setError(data?.error || "Failed to load task list");
+      return [];
+    }
+    setError(null);
+    return data.tasks || [];
+  }
+
+  async function showSelectedTask(taskId, { pollIfRunning } = { pollIfRunning: true }) {
+    stopPolling();
+    isRunning = false;
+    currentTaskId = taskId || null;
+    if (taskIdLabel) {
+      taskIdLabel.textContent = currentTaskId ? `task: ${currentTaskId}` : "";
+    }
+    setButtons();
+    if (!currentTaskId) return;
+
+    const st = await pollStatus(currentTaskId);
+    if (pollIfRunning && (st === "queued" || st === "running")) {
+      isRunning = true;
+      setButtons();
+      pollTimer = setInterval(() => pollStatus(currentTaskId), 2000);
+    } else {
+      isRunning = false;
+      setButtons();
+    }
+  }
+
+  async function restoreHistoryOnLoad() {
+    const savedUsername = localStorage.getItem(LS_USERNAME_KEY) || "default";
+    if (usernameInput) {
+      usernameInput.value = savedUsername;
+    }
+    const savedLastTaskId = localStorage.getItem(LS_LAST_TASK_KEY) || "";
+
+    let tasks = [];
+    try {
+      tasks = await loadTasksForUsername(savedUsername);
+    } catch (e) {
+      setError(e.message || String(e));
+      return;
+    }
+
+    renderTaskHistory(tasks);
+    if (!taskHistorySelect) return;
+    const taskIds = new Set((tasks || []).map((t) => t.task_id));
+
+    let selectedId = savedLastTaskId && taskIds.has(savedLastTaskId) ? savedLastTaskId : "";
+    if (!selectedId && tasks && tasks.length > 0) {
+      // Prefer an in-progress task, otherwise pick the first.
+      const inProgress = tasks.find((t) => (t.status || "").toLowerCase() === "running" || (t.status || "").toLowerCase() === "queued");
+      selectedId = inProgress ? inProgress.task_id : tasks[0].task_id;
+    }
+
+    taskHistorySelect.value = selectedId;
+    if (selectedId) {
+      localStorage.setItem(LS_LAST_TASK_KEY, selectedId);
+      await showSelectedTask(selectedId, { pollIfRunning: true });
+    } else {
+      await showSelectedTask(null, { pollIfRunning: false });
     }
   }
 
@@ -188,14 +284,22 @@
       const form = new FormData();
       form.append("video", file, file.name);
       // 上传到服务器
-      const data = await fetchJson("/upload", { method: "POST", body: form });
+      const uname =
+        (usernameInput && usernameInput.value ? usernameInput.value : localStorage.getItem(LS_USERNAME_KEY)) ||
+        "default";
+      const data = await fetchJson(`/upload?username=${encodeURIComponent((uname || "default").trim())}`, { method: "POST", body: form });
       if (!data || data.success !== true) {
         throw new Error(data?.error || "Upload failed");
       }
       // 设置当前任务id
       currentTaskId = data.task_id;
+      localStorage.setItem(LS_LAST_TASK_KEY, currentTaskId);
       // 显示id
       taskIdLabel.textContent = currentTaskId ? `task: ${currentTaskId}` : "";
+      if (taskHistorySelect) {
+        // If the task list hasn't been loaded yet for this session, we still keep the selection in localStorage.
+        taskHistorySelect.value = currentTaskId;
+      }
       // setUploadResult(data);
       setError(null);
       setBadge("uploaded");
@@ -293,5 +397,34 @@
   setStatus("Idle", "idle");
   setMeta(null);
   setButtons();
+
+  if (usernameInput && taskHistorySelect) {
+    restoreHistoryOnLoad();
+
+    usernameInput.addEventListener("change", async () => {
+      const uname = (usernameInput.value || "").trim() || "default";
+      localStorage.setItem(LS_USERNAME_KEY, uname);
+      stopPolling();
+      await showSelectedTask(null, { pollIfRunning: false });
+      const tasks = await loadTasksForUsername(uname);
+      renderTaskHistory(tasks);
+      // Best-effort: keep last selected task if it exists for this username.
+      const savedLastTaskId = localStorage.getItem(LS_LAST_TASK_KEY) || "";
+      if (savedLastTaskId && tasks.some((t) => t.task_id === savedLastTaskId)) {
+        taskHistorySelect.value = savedLastTaskId;
+        await showSelectedTask(savedLastTaskId, { pollIfRunning: true });
+      }
+    });
+
+    taskHistorySelect.addEventListener("change", async () => {
+      const tid = taskHistorySelect.value || "";
+      if (!tid) {
+        await showSelectedTask(null, { pollIfRunning: false });
+        return;
+      }
+      localStorage.setItem(LS_LAST_TASK_KEY, tid);
+      await showSelectedTask(tid, { pollIfRunning: true });
+    });
+  }
 })();
 

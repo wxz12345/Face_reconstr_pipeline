@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
+from collections import deque
 import subprocess
 import threading
 import uuid
@@ -13,6 +15,83 @@ from werkzeug.utils import secure_filename
 import config
 import task_manager
 
+TASKS_JSON_LOCK = threading.Lock()
+
+LOG_PREFIX_STDOUT = "STDOUT:"
+LOG_PREFIX_STDERR = "STDERR:"
+
+
+def _read_tasks_json_unlocked() -> dict[str, dict]:
+    if not config.TASKS_JSON_PATH.exists():
+        return {}
+    try:
+        with open(config.TASKS_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _write_tasks_json_unlocked(tasks: dict[str, dict]) -> None:
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = config.TASKS_JSON_PATH.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(tasks, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, config.TASKS_JSON_PATH)
+
+
+def _persist_task_full(task: dict) -> None:
+    task_id = task.get("task_id")
+    if not task_id:
+        return
+    with TASKS_JSON_LOCK:
+        tasks = _read_tasks_json_unlocked()
+        tasks[str(task_id)] = task
+        _write_tasks_json_unlocked(tasks)
+
+
+def _persist_task_fields(task_id: str, fields: dict) -> None:
+    with TASKS_JSON_LOCK:
+        tasks = _read_tasks_json_unlocked()
+        task = tasks.get(task_id) or {"task_id": task_id}
+        task.update(fields)
+        tasks[task_id] = task
+        _write_tasks_json_unlocked(tasks)
+
+
+def _get_task_from_disk(task_id: str) -> dict | None:
+    with TASKS_JSON_LOCK:
+        tasks = _read_tasks_json_unlocked()
+        return tasks.get(task_id)
+
+
+def _read_last_task_logs(task_id: str) -> tuple[str, str]:
+    stdout_lines: deque[str] = deque(maxlen=config.MAX_TASK_LOG_LINES)
+    stderr_lines: deque[str] = deque(maxlen=config.MAX_TASK_LOG_LINES)
+
+    log_path = config.LOGS_DIR / f"{task_id}.log"
+    if not log_path.exists():
+        return "", ""
+
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith(LOG_PREFIX_STDOUT):
+                    stdout_lines.append(line[len(LOG_PREFIX_STDOUT) :])
+                elif line.startswith(LOG_PREFIX_STDERR):
+                    stderr_lines.append(line[len(LOG_PREFIX_STDERR) :])
+    except Exception:
+        return "", ""
+
+    stdout = "".join(stdout_lines)
+    stderr = "".join(stderr_lines)
+    return (
+        task_manager.truncate_text(stdout, config.MAX_LOG_LENGTH),
+        task_manager.truncate_text(stderr, config.MAX_LOG_LENGTH),
+    )
+
 
 def create_app() -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -21,6 +100,27 @@ def create_app() -> Flask:
     # Ensure expected folders exist (safe if already present).
     config.UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
     config.RESULTS_FOLDER.mkdir(parents=True, exist_ok=True)
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Recovery: load persisted tasks and interrupt any in-flight runs.
+    persisted_tasks: dict[str, dict] = {}
+    with TASKS_JSON_LOCK:
+        persisted_tasks = _read_tasks_json_unlocked()
+        changed = False
+        now_iso = task_manager._now_iso()
+        for _, t in persisted_tasks.items():
+            if t.get("status") == "running":
+                t["status"] = "interrupted"
+                t["finished_at"] = now_iso
+                t.setdefault("error_message", "Task interrupted due to server restart.")
+                changed = True
+        if changed:
+            _write_tasks_json_unlocked(persisted_tasks)
+
+    with task_manager._LOCK:
+        task_manager.TASKS.clear()
+        task_manager.TASKS.update({str(k): v for k, v in persisted_tasks.items()})
 
     @app.get("/")
     def index():
@@ -65,12 +165,14 @@ def create_app() -> Flask:
         display_path = display_path.relative_to(base_path).as_posix()
         
         task_id = str(uuid.uuid4())
-        task_manager.create_task(
+        created_task = task_manager.create_task(
             task_id=task_id,
             filename=safe_name,
             file_path=str(saved_path),
             status="uploaded",
         )
+        created_task["username"] = request.args.get("username") or "default"
+        _persist_task_full(created_task)
 
         return (
             jsonify(
@@ -141,6 +243,17 @@ def create_app() -> Flask:
             download_ready=False,
             result_message=None,
         )
+        _persist_task_fields(
+            task_id,
+            {
+                "status": "queued",
+                "error_message": None,
+                "output_path": str(result_path),
+                "output_filename": result_filename,
+                "download_ready": False,
+                "result_message": None,
+            },
+        )
         # 定义一个内部函数，用于运行脚本。该函数会在后台线程中运行。
         def _runner(tid: str, fpath: str, gpu: int, rpath: str) -> None:
             # 更新任务状态为正在运行，清除错误信息，记录开始运行时间
@@ -156,6 +269,18 @@ def create_app() -> Flask:
                 download_ready=False,
                 result_message=None,
             )
+            _persist_task_fields(
+                tid,
+                {
+                    "status": "running",
+                    "started_at": task_manager._now_iso(),
+                    "error_message": None,
+                    "download_ready": False,
+                    "result_message": None,
+                    "return_code": None,
+                    "finished_at": None,
+                },
+            )
             try:
                 # 子进程运行脚本
                 # 调用脚本的地方
@@ -164,6 +289,11 @@ def create_app() -> Flask:
                 err_lines: list[str] = []
                 out_lock = threading.Lock()
                 err_lock = threading.Lock()
+
+                log_path = config.LOGS_DIR / f"{tid}.log"
+                with open(log_path, "w", encoding="utf-8"):
+                    pass
+                log_write_lock = threading.Lock()
 
                 child_env = os.environ.copy()
                 # Make python scripts invoked by whole.sh flush output promptly.
@@ -183,21 +313,25 @@ def create_app() -> Flask:
                 ) -> None:
                     if stream is None:
                         return
-                    for line in iter(stream.readline, ""):
-                        with lock:
-                            lines.append(line)
-                            # Enforce a rolling line limit so the frontend stays readable.
-                            if len(lines) > config.MAX_TASK_LOG_LINES:
-                                del lines[: len(lines) - config.MAX_TASK_LOG_LINES]
-                            joined = "".join(lines)
-                        task_manager.update_task(
-                            tid,
-                            **{
-                                field: task_manager.truncate_text(
-                                    joined, config.MAX_LOG_LENGTH
-                                )
-                            },
-                        )
+                    prefix = LOG_PREFIX_STDOUT if field == "stdout" else LOG_PREFIX_STDERR
+                    with open(log_path, "a", encoding="utf-8", errors="replace", buffering=1) as log_fh:
+                        for line in iter(stream.readline, ""):
+                            with lock:
+                                lines.append(line)
+                                # Enforce a rolling line limit so the frontend stays readable.
+                                if len(lines) > config.MAX_TASK_LOG_LINES:
+                                    del lines[: len(lines) - config.MAX_TASK_LOG_LINES]
+                                joined = "".join(lines)
+                            with log_write_lock:
+                                log_fh.write(prefix + line)
+                            task_manager.update_task(
+                                tid,
+                                **{
+                                    field: task_manager.truncate_text(
+                                        joined, config.MAX_LOG_LENGTH
+                                    )
+                                },
+                            )
                     stream.close()
 
                 stdout_thread = threading.Thread(
@@ -259,6 +393,19 @@ def create_app() -> Flask:
                     download_ready=download_ready,
                     result_message=result_message,
                 )
+                _persist_task_fields(
+                    tid,
+                    {
+                        "status": status,
+                        "finished_at": task_manager._now_iso(),
+                        "return_code": rc,
+                        "error_message": error_message,
+                        "download_ready": download_ready,
+                        "result_message": result_message,
+                        "stdout": out_t,
+                        "stderr": err_t,
+                    },
+                )
             except Exception as e:
                 logging.exception(
                     "run_task _runner failed task_id=%s path=%s gpu=%s",
@@ -277,6 +424,19 @@ def create_app() -> Flask:
                     download_ready=False,
                     result_message="Script execution raised an exception.",
                 )
+                _persist_task_fields(
+                    tid,
+                    {
+                        "status": "failed",
+                        "finished_at": task_manager._now_iso(),
+                        "return_code": None,
+                        "error_message": str(e),
+                        "download_ready": False,
+                        "result_message": "Script execution raised an exception.",
+                        "stdout": "",
+                        "stderr": "",
+                    },
+                )
 
         # 创建一个后台线程来运行脚本_runner
         # 参数：任务id、输入文件路径、输出文件路径
@@ -292,14 +452,29 @@ def create_app() -> Flask:
 
     @app.get("/status/<task_id>")
     def status(task_id: str):
-        task = task_manager.get_task(task_id)
+        task = _get_task_from_disk(task_id)
         if not task:
             return jsonify({"success": False, "error": "task not found"}), 404
+        stdout, stderr = _read_last_task_logs(task_id)
+        task["stdout"] = stdout
+        task["stderr"] = stderr
         return jsonify({"success": True, "task": task}), 200
+
+    @app.get("/tasks")
+    def tasks_by_username():
+        username = request.args.get("username") or "default"
+        with TASKS_JSON_LOCK:
+            tasks = _read_tasks_json_unlocked()
+            filtered = [
+                t
+                for t in tasks.values()
+                if (t.get("username") or "default") == username
+            ]
+        return jsonify({"success": True, "tasks": filtered}), 200
 
     @app.get("/download/<task_id>")
     def download(task_id: str):
-        task = task_manager.get_task(task_id)
+        task = _get_task_from_disk(task_id)
         if not task:
             return jsonify({"success": False, "error": "task not found"}), 404
 

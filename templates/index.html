@@ -36,6 +36,25 @@
       </section>
 
       <section class="card">
+        <h2>History</h2>
+        <div class="row">
+          <span class="mono" style="color: rgba(255, 255, 255, 0.7); font-size: 13px;">Username</span>
+          <input
+            id="usernameInput"
+            type="text"
+            placeholder="default"
+            autocomplete="off"
+            style="padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.14); background: rgba(255, 255, 255, 0.08); color: rgba(255, 255, 255, 0.92);"
+          />
+        </div>
+        <div class="row" style="margin-top: 10px;">
+          <select id="taskHistorySelect" size="6" style="width: 100%; padding: 10px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.14); background: rgba(0, 0, 0, 0.18); color: rgba(255, 255, 255, 0.92); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">
+          </select>
+        </div>
+        <div class="hint">Select a task to view logs and download the result when ready.</div>
+      </section>
+
+      <section class="card">
         <h2>Status</h2>
         <div class="row row-tight">
           <span id="statusBadge" class="badge badge-idle">idle</span>

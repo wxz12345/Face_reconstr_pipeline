@@ -20,3 +20,8 @@ MAX_LOG_LENGTH = 200_000
 # This is enforced as a rolling window during streaming, so polling stays readable.
 MAX_TASK_LOG_LINES = 100
 
+# Disk-backed persistence (used for recovery after server restart).
+DATA_DIR = BASE_DIR / "data"
+TASKS_JSON_PATH = DATA_DIR / "tasks.json"
+LOGS_DIR = DATA_DIR / "logs"
+
