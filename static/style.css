@@ -25,7 +25,7 @@ body {
 }
 
 .container {
-  max-width: 920px;
+  max-width: 1200px;
   margin: 40px auto;
   padding: 0 16px 40px;
 }
@@ -154,12 +154,6 @@ button:disabled {
   display: grid;
   grid-template-columns: 1fr;
   gap: 12px;
-}
-
-@media (min-width: 860px) {
-  .split {
-    grid-template-columns: 1fr 1fr;
-  }
 }
 
 .label {
