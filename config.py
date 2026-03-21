@@ -25,3 +25,6 @@ DATA_DIR = BASE_DIR / "data"
 TASKS_JSON_PATH = DATA_DIR / "tasks.json"
 LOGS_DIR = DATA_DIR / "logs"
 
+# Default GPU index when the client omits `gpu` or detection fails.
+DEFAULT_GPU_ID = 0
+

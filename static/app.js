@@ -13,9 +13,13 @@
   const downloadBtn = document.getElementById("downloadBtn");
   const usernameInput = document.getElementById("usernameInput");
   const taskHistorySelect = document.getElementById("taskHistorySelect");
+  const gpuRefreshBtn = document.getElementById("gpuRefreshBtn");
+  const gpuSelect = document.getElementById("gpuSelect");
+  const gpuStatusArea = document.getElementById("gpuStatusArea");
 
   const LS_USERNAME_KEY = "webRunnerUsername";
   const LS_LAST_TASK_KEY = "webRunnerLastSelectedTaskId";
+  const LS_GPU_KEY = "webRunnerPreferredGpu";
 
   let currentTaskId = null;
   let pollTimer = null;
@@ -62,6 +66,7 @@
        ["output_filename", task?.output_filename],
        ["download_ready", task?.download_ready],
        ["result_message", task?.result_message],
+      ["gpu_id", task?.gpu_id],
     ];
 
     metaArea.innerHTML = fields
@@ -113,6 +118,83 @@
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&#039;");
+  }
+
+  function getSelectedGpuId() {
+    if (!gpuSelect || !gpuSelect.value) return "0";
+    return gpuSelect.value;
+  }
+
+  function renderGpuStatus(data) {
+    if (!gpuStatusArea) return;
+    if (!data || data.success !== true) {
+      gpuStatusArea.innerHTML =
+        `<div class="kvRow"><div class="kvKey">status</div><div class="kvVal"><span class="muted">Failed to load GPU info</span></div></div>`;
+      return;
+    }
+    if (!data.available) {
+      const msg = data.message || "No NVIDIA GPU or nvidia-smi unavailable.";
+      gpuStatusArea.innerHTML =
+        `<div class="kvRow"><div class="kvKey">status</div><div class="kvVal">${escapeHtml(msg)}</div></div>`;
+      return;
+    }
+    const rows = (data.gpus || []).map((g) => {
+      const util = g.utilization_percent != null ? `${g.utilization_percent}%` : "—";
+      const mem =
+        g.memory_used_mb != null && g.memory_total_mb != null
+          ? `${g.memory_used_mb} / ${g.memory_total_mb} MiB`
+          : "—";
+      const procs = g.process_count != null ? String(g.process_count) : "—";
+      const line = `util ${util} · mem ${mem} · processes ${procs}`;
+      return `<div class="kvRow"><div class="kvKey">gpu ${escapeHtml(String(g.index))}</div><div class="kvVal">${escapeHtml(line)}</div></div>`;
+    });
+    gpuStatusArea.innerHTML = rows.join("");
+  }
+
+  function populateGpuSelect(data) {
+    if (!gpuSelect) return;
+    const prev = gpuSelect.value;
+    gpuSelect.innerHTML = "";
+    const gpus = data && data.gpus && data.gpus.length ? data.gpus : null;
+    if (gpus) {
+      for (const g of gpus) {
+        const opt = document.createElement("option");
+        opt.value = String(g.index);
+        const util = g.utilization_percent != null ? `${g.utilization_percent}%` : "?";
+        const mem =
+          g.memory_used_mb != null && g.memory_total_mb != null
+            ? `${g.memory_used_mb}/${g.memory_total_mb} MiB`
+            : "?/? MiB";
+        const procs = g.process_count != null ? String(g.process_count) : "?";
+        opt.textContent = `GPU ${g.index} — ${util} — ${mem} — procs ${procs}`;
+        gpuSelect.appendChild(opt);
+      }
+    } else {
+      const opt = document.createElement("option");
+      opt.value = "0";
+      opt.textContent = "GPU 0 (default)";
+      gpuSelect.appendChild(opt);
+    }
+    const def = data && data.default_gpu != null ? String(data.default_gpu) : "0";
+    const saved = localStorage.getItem(LS_GPU_KEY);
+    const valid = saved && [...gpuSelect.options].some((o) => o.value === saved);
+    gpuSelect.value = valid ? saved : def;
+    if (prev && [...gpuSelect.options].some((o) => o.value === prev)) {
+      gpuSelect.value = prev;
+    }
+  }
+
+  async function loadGpuStatus() {
+    if (!gpuSelect || !gpuStatusArea) return;
+    try {
+      const data = await fetchJson("/gpu/status", { method: "GET" });
+      renderGpuStatus(data);
+      populateGpuSelect(data);
+    } catch (e) {
+      gpuStatusArea.innerHTML =
+        `<div class="kvRow"><div class="kvKey">status</div><div class="kvVal">${escapeHtml(e.message || String(e))}</div></div>`;
+      populateGpuSelect({ default_gpu: 0, gpus: [] });
+    }
   }
 
   async function fetchJson(url, options) {
@@ -287,7 +369,11 @@
       const uname =
         (usernameInput && usernameInput.value ? usernameInput.value : localStorage.getItem(LS_USERNAME_KEY)) ||
         "default";
-      const data = await fetchJson(`/upload?username=${encodeURIComponent((uname || "default").trim())}`, { method: "POST", body: form });
+      const gpuQ = `&gpu=${encodeURIComponent(getSelectedGpuId())}`;
+      const data = await fetchJson(
+        `/upload?username=${encodeURIComponent((uname || "default").trim())}${gpuQ}`,
+        { method: "POST", body: form }
+      );
       if (!data || data.success !== true) {
         throw new Error(data?.error || "Upload failed");
       }
@@ -346,7 +432,10 @@
     setStatus("Queued...", "queued");
 
     try {
-      const data = await fetchJson(`/run/${encodeURIComponent(currentTaskId)}`, { method: "POST" });
+      const data = await fetchJson(
+        `/run/${encodeURIComponent(currentTaskId)}?gpu=${encodeURIComponent(getSelectedGpuId())}`,
+        { method: "POST" }
+      );
       if (!data || data.success !== true) {
         throw new Error(data?.error || "Run failed");
       }
@@ -397,6 +486,16 @@
   setStatus("Idle", "idle");
   setMeta(null);
   setButtons();
+
+  if (gpuRefreshBtn && gpuSelect) {
+    gpuRefreshBtn.addEventListener("click", () => {
+      loadGpuStatus();
+    });
+    gpuSelect.addEventListener("change", () => {
+      localStorage.setItem(LS_GPU_KEY, gpuSelect.value);
+    });
+    loadGpuStatus();
+  }
 
   if (usernameInput && taskHistorySelect) {
     restoreHistoryOnLoad();

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import json
 import os
-from collections import deque
+from collections import defaultdict, deque
 import subprocess
 import threading
 import uuid
@@ -93,6 +93,124 @@ def _read_last_task_logs(task_id: str) -> tuple[str, str]:
     )
 
 
+def _parse_gpu_query_param() -> tuple[int | None, str | None]:
+    """Parse `gpu` from query string; returns (gpu_id, error_message)."""
+    raw = request.args.get("gpu", type=str)
+    if raw is None or str(raw).strip() == "":
+        return config.DEFAULT_GPU_ID, None
+    try:
+        gid = int(str(raw).strip(), 10)
+    except ValueError:
+        return None, "invalid gpu parameter"
+    if gid < 0:
+        return None, "invalid gpu parameter"
+    return gid, None
+
+
+def _nvidia_smi_gpu_status() -> dict:
+    """
+    Return GPU stats via nvidia-smi. On any failure, returns a safe empty payload.
+    """
+    empty: dict = {
+        "available": False,
+        "default_gpu": config.DEFAULT_GPU_ID,
+        "gpus": [],
+        "message": "No NVIDIA GPU detected or nvidia-smi unavailable.",
+    }
+    try:
+        r = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,uuid,utilization.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return dict(empty)
+
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return dict(empty)
+
+    gpus: list[dict] = []
+    for line in (r.stdout or "").strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 5:
+            continue
+        try:
+            idx = int(parts[0], 10)
+        except ValueError:
+            continue
+        gpu_uuid = parts[1]
+        util_raw = parts[2].replace("%", "").strip()
+        try:
+            util = int(util_raw, 10) if util_raw else None
+        except ValueError:
+            util = None
+        try:
+            mem_used = int(parts[3], 10)
+            mem_total = int(parts[4], 10)
+        except ValueError:
+            mem_used, mem_total = None, None
+        gpus.append(
+            {
+                "index": idx,
+                "utilization_percent": util,
+                "memory_used_mb": mem_used,
+                "memory_total_mb": mem_total,
+                "process_count": None,
+            }
+        )
+        # Keep uuid only for internal counting (stripped before response).
+        gpus[-1]["_uuid"] = gpu_uuid
+
+    if not gpus:
+        return dict(empty)
+
+    uuid_to_index = {g["_uuid"]: g["index"] for g in gpus}
+    try:
+        r2 = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=gpu_uuid,pid",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if r2.returncode == 0 and (r2.stdout or "").strip():
+            counts: dict[str, int] = defaultdict(int)
+            for line in (r2.stdout or "").strip().splitlines():
+                ap = [p.strip() for p in line.split(",")]
+                if len(ap) >= 2 and ap[0]:
+                    counts[ap[0]] += 1
+            for g in gpus:
+                u = g.get("_uuid")
+                if u:
+                    g["process_count"] = int(counts.get(u, 0))
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        for g in gpus:
+            if g.get("process_count") is None:
+                g["process_count"] = None
+
+    for g in gpus:
+        g.pop("_uuid", None)
+
+    indices = [g["index"] for g in gpus]
+    default_gpu = min(indices) if indices else config.DEFAULT_GPU_ID
+    return {
+        "available": True,
+        "default_gpu": default_gpu,
+        "gpus": gpus,
+        "message": None,
+    }
+
+
 def create_app() -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config["MAX_CONTENT_LENGTH"] = config.MAX_CONTENT_LENGTH
@@ -125,6 +243,11 @@ def create_app() -> Flask:
     @app.get("/")
     def index():
         return render_template("index.html")
+
+    @app.get("/gpu/status")
+    def gpu_status():
+        payload = _nvidia_smi_gpu_status()
+        return jsonify({"success": True, **payload}), 200
 
     @app.post("/upload")
     def upload():
@@ -172,6 +295,14 @@ def create_app() -> Flask:
             status="uploaded",
         )
         created_task["username"] = request.args.get("username") or "default"
+        gpu_upload = request.args.get("gpu", type=str)
+        if gpu_upload is not None and str(gpu_upload).strip() != "":
+            try:
+                g_u = int(str(gpu_upload).strip(), 10)
+                if g_u >= 0:
+                    created_task["gpu_id"] = g_u
+            except ValueError:
+                pass
         _persist_task_full(created_task)
 
         return (
@@ -189,6 +320,10 @@ def create_app() -> Flask:
 
     @app.post("/run/<task_id>")
     def run_task(task_id: str):
+        gpu_id, gpu_err = _parse_gpu_query_param()
+        if gpu_err:
+            return jsonify({"success": False, "error": gpu_err}), 400
+
         # 检测任务是否存在
         task = task_manager.get_task(task_id)
         if not task:
@@ -242,6 +377,7 @@ def create_app() -> Flask:
             output_filename=result_filename,
             download_ready=False,
             result_message=None,
+            gpu_id=gpu_id,
         )
         _persist_task_fields(
             task_id,
@@ -252,6 +388,7 @@ def create_app() -> Flask:
                 "output_filename": result_filename,
                 "download_ready": False,
                 "result_message": None,
+                "gpu_id": gpu_id,
             },
         )
         # 定义一个内部函数，用于运行脚本。该函数会在后台线程中运行。
@@ -442,8 +579,9 @@ def create_app() -> Flask:
         # 参数：任务id、输入文件路径、输出文件路径
         # daemon=True表示后台线程
         thread = threading.Thread(
-            # target=_runner, args=(task_id, str(file_path), str(result_path)), daemon=True
-            target=_runner, args=(task_id, str(seq_name), 5, str(result_path)), daemon=True
+            target=_runner,
+            args=(task_id, str(seq_name), gpu_id, str(result_path)),
+            daemon=True,
         )
         # 启动线程
         thread.start()

@@ -14,6 +14,21 @@
       </header>
 
       <section class="card">
+        <h2>GPU</h2>
+        <div class="row">
+          <button id="gpuRefreshBtn" type="button">Refresh GPU status</button>
+        </div>
+        <div id="gpuStatusArea" class="kv" style="margin-top: 10px;"></div>
+        <div class="row" style="margin-top: 12px; align-items: flex-start;">
+          <span class="mono" style="color: rgba(255, 255, 255, 0.7); font-size: 13px; padding-top: 10px;">Use GPU</span>
+          <select
+            id="gpuSelect" class="custom-select"
+          ></select>
+        </div>
+        <div class="hint">Status comes from <span class="mono">nvidia-smi</span> on the server. Pick a GPU before upload or start.</div>
+      </section>
+
+      <section class="card">
         <h2>1) Upload</h2>
         <div class="row">
           <input

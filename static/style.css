@@ -230,3 +230,25 @@ button:disabled {
   color: var(--accent);
 }
 
+.custom-select {
+  /* 布局与尺寸 */
+  flex: 1;
+  min-width: 200px;
+  padding: 10px;
+
+  /* 视觉风格 (毛玻璃/深色) */
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.18);
+  color: rgba(255, 255, 255, 0.92);
+
+  /* 字体 */
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+.custom-select option {
+  background-color: #1a1a1a; /* 修改下拉列表背景色 */
+  color: rgba(255, 255, 255, 0.9);
+  padding: 12px; /* 仅在某些浏览器(如 Firefox)生效 */
+  font-family: inherit;
+}
